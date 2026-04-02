@@ -3,104 +3,99 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import google.generativeai as genai
 
-# 1. Configuración inicial de la página
-st.set_page_config(
-    page_title="Inventario Químico - UT Tehuacán", 
-    page_icon="🧪",
-    layout="wide"
-)
+# 1. Configuración de la página
+st.set_page_config(page_title="Inventario Global UT Tehuacán", page_icon="🧪", layout="wide")
 
-# 2. Configuración de la IA (Gemini)
-# El bloque try/except evita que la app falle si aún no pones la clave
+# 2. Configuración de IA
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # Utilizamos la versión flash, ideal para respuestas rápidas de texto
     model = genai.GenerativeModel('gemini-1.5-flash') 
     ia_activa = True
-except Exception as e:
+except Exception:
     ia_activa = False
-    st.sidebar.warning("⚠️ IA Desactivada. Configura GEMINI_API_KEY en los secretos para activar el Asistente de Seguridad.")
 
-# Encabezado principal
-st.title("🔬 Gestión Centralizada de Reactivos")
-st.markdown("**Universidad Tecnológica de Tehuacán** | Consulta de disponibilidad y análisis de seguridad (IA).")
+st.title("🔬 Sistema de Búsqueda Global de Reactivos")
+st.markdown("Busca en todos los laboratorios de la universidad para optimizar el uso de sustancias químicas.")
 
-# 3. Configuración de Laboratorios (Reemplaza con tus URLs de prueba)
+# 3. Definición de Laboratorios (Sustituye por tus links reales)
 LABS = {
     "Laboratorio de Química Orgánica": "https://docs.google.com/spreadsheets/d/14zJKq0Vz4DysPnxCuHziEY1gXmEfDNobmtWiVjeK22M/edit?usp=sharing",
     "Laboratorio de Operaciones Unitarias": "https://docs.google.com/spreadsheets/d/1KN_BtaMVfclW-F6GfymrvhPRD6looPiqzNcqTWw8kJE/edit?usp=sharing",
     "Laboratorio de Análisis Instrumental": "https://docs.google.com/spreadsheets/d/1f6yGcIZsUUr_Qp8Vxv2ONKEYzZND5bNr5reBEhalJP8/edit?usp=sharing"
 }
 
-# 4. Interfaz Lateral (Sidebar)
-st.sidebar.header("Navegación")
-lab_seleccionado = st.sidebar.selectbox("Seleccione el Laboratorio:", list(LABS.keys()))
+# 4. Función para cargar y consolidar todos los datos
+@st.cache_data(ttl=600) # Caché de 10 minutos para no saturar las conexiones
+def cargar_inventario_maestro():
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    lista_dfs = []
+    
+    for nombre_lab, url in LABS.items():
+        try:
+            # Leer cada hoja
+            df_temp = conn.read(spreadsheet=url)
+            df_temp = df_temp.dropna(how="all")
+            # Forzamos que la columna 'Laboratorio' indique de dónde viene el dato
+            df_temp['Ubicación Actual'] = nombre_lab
+            lista_dfs.append(df_temp)
+        except Exception as e:
+            st.error(f"Error al leer {nombre_lab}: {e}")
+            
+    if lista_dfs:
+        return pd.concat(lista_dfs, ignore_index=True)
+    return pd.DataFrame()
 
-st.sidebar.divider()
-st.sidebar.info("💡 **Instrucciones:**\n1. Seleccione un laboratorio.\n2. Busque el reactivo por nombre o CAS.\n3. Utilice el asistente al final de la página para leer la Hoja de Seguridad resumida.")
+# Carga inicial de datos
+with st.spinner("Consolidando inventarios de todos los laboratorios..."):
+    df_maestro = cargar_inventario_maestro()
 
-# 5. Conexión a Google Sheets y Visualización
-url_sheet = LABS[lab_seleccionado]
-conn = st.connection("gsheets", type=GSheetsConnection)
+# 5. Interfaz de Búsqueda Global
+if not df_maestro.empty:
+    st.sidebar.header("Filtros de Búsqueda")
+    
+    # Buscador central
+    busqueda = st.text_input("🔍 Ingrese Nombre de la Sustancia o Número CAS:", placeholder="Ej: Acetona o 67-64-1")
+    
+    # Filtro opcional por laboratorio en el sidebar
+    lab_filter = st.sidebar.multiselect("Filtrar por Laboratorios específicos:", options=df_maestro['Ubicación Actual'].unique())
 
-try:
-    # Leemos los datos de la hoja correspondiente
-    df = conn.read(spreadsheet=url_sheet)
+    # Aplicar filtros
+    df_final = df_maestro.copy()
     
-    # Limpieza básica: quitar filas completamente vacías
-    df = df.dropna(how="all")
-    
-    st.subheader(f"📦 Inventario actual: {lab_seleccionado}")
-    
-    # Motor de búsqueda
-    busqueda = st.text_input("🔍 Buscar reactivo por nombre o CAS:", "")
-    
-    # Filtrado del DataFrame
     if busqueda:
-        df_filtered = df[df['Nombre'].str.contains(busqueda, case=False, na=False) | 
-                         df['CAS'].str.contains(busqueda, case=False, na=False)]
-    else:
-        df_filtered = df
+        df_final = df_final[
+            df_final['Nombre'].str.contains(busqueda, case=False, na=False) | 
+            df_final['CAS'].str.contains(busqueda, case=False, na=False)
+        ]
+    
+    if lab_filter:
+        df_final = df_final[df_final['Ubicación Actual'].isin(lab_filter)]
 
-    # Mostrar la tabla sin el índice de pandas
-    st.dataframe(df_filtered, use_container_width=True, hide_index=True)
+    # Mostrar resultados
+    st.subheader(f"Resultados encontrados: {len(df_final)}")
+    st.dataframe(df_final, use_container_width=True, hide_index=True)
 
-    # 6. Módulo del Asistente Técnico y de Seguridad
-    if not df_filtered.empty and ia_activa:
+    # 6. Análisis de Seguridad con IA
+    if not df_final.empty and ia_activa:
         st.divider()
-        st.subheader("🛡️ Asistente Técnico y de Seguridad (IA)")
-        
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            sustancia_analisis = st.selectbox(
-                "Seleccione un reactivo para consultar su Hoja de Seguridad:", 
-                df_filtered['Nombre'].unique()
-            )
-            analizar_btn = st.button("Analizar con Gemini", type="primary", use_container_width=True)
-            
-        with col2:
-            if analizar_btn:
-                with st.spinner(f"Analizando propiedades químicas y de seguridad para: {sustancia_analisis}..."):
-                    # Prompt de ingeniería estructurado para obtener respuestas precisas
+            st.subheader("🛡️ Consultar Seguridad")
+            sustancia_sel = st.selectbox("Seleccione para analizar:", df_final['Nombre'].unique())
+            if st.button("Explicar con IA", type="primary"):
+                with st.spinner("Consultando protocolos..."):
                     prompt = f"""
-                    Actúa como un ingeniero químico experto en seguridad de laboratorios e higiene industrial.
-                    Proporciona un resumen técnico y de seguridad sobre la sustancia '{sustancia_analisis}'.
-                    Estructura tu respuesta estrictamente con los siguientes encabezados:
-                    
-                    * **Clasificación de Peligros (SGA/GHS):** (Menciona los riesgos principales).
-                    * **Primeros Auxilios Básicos:** (Qué hacer en caso de contacto o inhalación).
-                    * **Equipo de Protección Personal (EPP):** (Guantes recomendados, tipo de mascarilla, etc.).
-                    * **Aplicaciones en Ingeniería Química:** (Usos comunes en prácticas universitarias o industria).
-                    
-                    Sé conciso, profesional y utiliza viñetas.
+                    Como experto en seguridad química, analiza la sustancia: {sustancia_sel}.
+                    Detalla: 1. Peligros GHS. 2. EPP necesario. 3. Qué laboratorios suelen usarla y para qué.
+                    Responde de forma ejecutiva para un entorno universitario.
                     """
-                    try:
-                        respuesta = model.generate_content(prompt)
-                        st.info(respuesta.text)
-                    except Exception as e:
-                        st.error("Hubo un problema de conexión con la IA. Intenta de nuevo más tarde.")
+                    res = model.generate_content(prompt)
+                    st.session_state['res_ia'] = res.text
 
-except Exception as e:
-    st.error(f"❌ Error al conectar con la base de datos de {lab_seleccionado}.")
-    st.warning("Verifica que el enlace de Google Sheets sea correcto, esté público como 'Lector' y contenga datos.")
+        with col2:
+            if 'res_ia' in st.session_state:
+                st.info(st.session_state['res_ia'])
+else:
+    st.warning("No se encontraron datos. Verifica las URLs y permisos de Google Sheets.")
+
